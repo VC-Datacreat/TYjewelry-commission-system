@@ -122,69 +122,58 @@ def calculate_commission(df):
         
         # 根据类型计算提成
         if commission_type == 'A1':
-            # 计算A1类型提成
-            for idx in order_df.index:
-                if df.loc[idx, '标签价'] > 0:
-                    discount_rate = df.loc[idx, '最终售价'] / df.loc[idx, '标签价']
-                    df.loc[idx, '标价折扣率'] = discount_rate
-                    
-                    commission_rate = get_a1_commission_rate(
-                        df.loc[idx, '货品种类'],
-                        discount_rate
-                    )
-                    df.loc[idx, '标价提成率'] = commission_rate
-                    df.loc[idx, '标价提成'] = df.loc[idx, '最终售价'] * commission_rate
+            # 计算A1类型提成 - 优化为向量化操作
+            valid_price_mask = order_df['标签价'] > 0
+            if valid_price_mask.any():
+                valid_rows = order_df[valid_price_mask]
+                
+                discount_rates = valid_rows['最终售价'] / valid_rows['标签价']
+                df.loc[valid_rows.index, '标价折扣率'] = discount_rates
+                
+                commission_rates = valid_rows.apply(
+                    lambda row: get_a1_commission_rate(
+                        row['货品种类'], 
+                        row['最终售价'] / row['标签价']
+                    ), 
+                    axis=1
+                )
+                df.loc[valid_rows.index, '标价提成率'] = commission_rates
+                df.loc[valid_rows.index, '标价提成'] = valid_rows['最终售价'] * commission_rates
         
         elif commission_type == 'A2':
-            # A2类型：销售(重量)
-            for idx in order_df[order_df['状态'] == '销售'].index:
-                # 增购金重提成
-                gold_weight = df.loc[idx, '金重']
-                if df.loc[idx, '当天金价'] > 0 and df.loc[idx, '实销金价（不含工费）'] > 0:
-                    price_discount = df.loc[idx, '当天金价'] - df.loc[idx, '实销金价（不含工费）']
+            # A2类型：销售(重量) - 优化为向量化操作
+            sales_rows = order_df[order_df['状态'] == '销售']
+            
+            if not sales_rows.empty:
+                valid_gold_mask = (sales_rows['当天金价'] > 0) & (sales_rows['实销金价（不含工费）'] > 0)
+                if valid_gold_mask.any():
+                    valid_gold_rows = sales_rows[valid_gold_mask]
+                    price_discounts = valid_gold_rows['当天金价'] - valid_gold_rows['实销金价（不含工费）']
                     
-                    # 根据金价优惠确定提成率
-                    if price_discount <= 10:
-                        rate = 5
-                    elif price_discount <= 20:
-                        rate = 4
-                    elif price_discount <= 30:
-                        rate = 3
-                    elif price_discount <= 40:
-                        rate = 2
-                    elif price_discount <= 50:
-                        rate = 1
-                    else:
-                        rate = 0.5
+                    rates = pd.cut(price_discounts, 
+                                 bins=[-np.inf, 10, 20, 30, 40, 50, np.inf],
+                                 labels=[5, 4, 3, 2, 1, 0.5],
+                                 right=True).astype(float)
                     
-                    df.loc[idx, '增购金重提成'] = gold_weight * rate
+                    gold_commissions = valid_gold_rows['金重'] * rates
+                    df.loc[valid_gold_rows.index, '增购金重提成'] = gold_commissions
                 
-                # 工费提成
-                if df.loc[idx, '原精品工费'] > 0:
-                    labor_discount = df.loc[idx, '零售工费'] / df.loc[idx, '原精品工费']
+                valid_labor_mask = sales_rows['原精品工费'] > 0
+                if valid_labor_mask.any():
+                    valid_labor_rows = sales_rows[valid_labor_mask]
+                    labor_discounts = valid_labor_rows['零售工费'] / valid_labor_rows['原精品工费']
                     
-                    if labor_discount >= 0.99:
-                        labor_rate = 0.05
-                    elif labor_discount >= 0.95:
-                        labor_rate = 0.04
-                    elif labor_discount >= 0.90:
-                        labor_rate = 0.03
-                    elif labor_discount >= 0.85:
-                        labor_rate = 0.02
-                    elif labor_discount >= 0.80:
-                        labor_rate = 0.01
-                    else:
-                        labor_rate = 0
+                    labor_rates = pd.cut(labor_discounts,
+                                       bins=[-np.inf, 0.80, 0.85, 0.90, 0.95, 0.99, np.inf],
+                                       labels=[0, 0.01, 0.02, 0.03, 0.04, 0.05],
+                                       right=False).astype(float)
                     
-                    df.loc[idx, '工费提成'] = df.loc[idx, '零售工费'] * labor_rate
+                    labor_commissions = valid_labor_rows['零售工费'] * labor_rates
+                    df.loc[valid_labor_rows.index, '工费提成'] = labor_commissions
         
-        # 计算整单提成（只在首行显示）
-        order_total = (
-            df.loc[order_mask, '标价提成'].sum() +
-            df.loc[order_mask, '增购金重提成'].sum() +
-            df.loc[order_mask, '工费提成'].sum() +
-            df.loc[order_mask, '旧料提成'].sum()
-        )
+        # 计算整单提成（只在首行显示） - 优化为单次计算
+        commission_columns = ['标价提成', '增购金重提成', '工费提成', '旧料提成']
+        order_total = df.loc[order_mask, commission_columns].sum().sum()
         first_row_idx = order_df.index[0]
         df.loc[first_row_idx, '整单提成'] = order_total
     
